@@ -1,0 +1,69 @@
+version: '3.8'
+
+services:
+  # auth service (database)
+  auth_db:
+    image: postgres:15-alpine
+    container_name: bank_auth_db
+    environment:
+      POSTGRES_USER: ${AUTH_DB_USER}
+      POSTGRES_PASSWORD: ${AUTH_DB_PASSWORD}
+      POSTGRES_DB: ${AUTH_DB_NAME}
+    ports:
+      - "54311:5432"
+    volumes:
+      - auth_db_data:/var/lib/postgresql/data
+    networks:
+      - bank_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${AUTH_DB_USER} -d ${AUTH_DB_NAME}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # wallet service (database)
+  wallet_db:
+    image: postgres:15-alpine
+    container_name: bank_wallet_db
+    environment:
+      POSTGRES_USER: ${WALLET_DB_USER}
+      POSTGRES_PASSWORD: ${WALLET_DB_PASSWORD}
+      POSTGRES_DB: ${WALLET_DB_NAME}
+    ports:
+      - "54312:5432"
+    volumes:
+      - wallet_db_data:/var/lib/postgresql/data
+    networks:
+      - bank_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${WALLET_DB_USER} -d ${WALLET_DB_NAME}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # cache & idempotence (redis)
+  redis:
+    image: redis:7-alpine
+    container_name: bank_redis
+    ports:
+      - "6379:6379"
+    networks:
+      - bank_network
+
+  # dummy mail server (mailhog)
+  mailhog:
+    image: mailhog/mailhog
+    container_name: bank_mailhog
+    ports:
+      - "1025:1025" # SMTP port for sending emails form code
+      - "8025:8025" # Web UI port for viewing emails in a browser
+    networks:
+      - bank_network
+
+volumes:
+  auth_db_data:
+  wallet_db_data:
+
+networks:
+  bank_network:
+    driver: bridge
