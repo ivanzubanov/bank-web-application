@@ -10,12 +10,16 @@ from dotenv import load_dotenv
 
 current_dir = dirname(abspath(__file__))
 project_root = dirname(current_dir)
-wallet_service_path = join(project_root, 'bank-wallet')
+wallet_service_path = join(project_root, 'bank_wallet')
 
 load_dotenv(join(project_root, '.env'))
 
 if wallet_service_path not in sys.path:
     sys.path.insert(0, wallet_service_path)
+
+# monorepo pytest solution
+sys.modules.pop('config', None)
+sys.modules.pop('database', None)
 
 from config import settings
 from database import Base
@@ -50,17 +54,6 @@ config.set_main_option("sqlalchemy.url", DATABASE_URL)
 
 
 def run_migrations_offline() -> None:
-    """Run migrations in 'offline' mode.
-
-    This configures the context with just a URL
-    and not an Engine, though an Engine is acceptable
-    here as well.  By skipping the Engine creation
-    we don't even need a DBAPI to be available.
-
-    Calls to context.execute() here emit the given string to the
-    script output.
-
-    """
     url = config.get_main_option("sqlalchemy.url")
     context.configure(
         url=url,
@@ -73,7 +66,6 @@ def run_migrations_offline() -> None:
         context.run_migrations()
 
 def do_run_migrations(connection):
-    """Вспомогательный синхронный контекст внутри асинхронного соединения."""
     context.configure(
         connection=connection,
         target_metadata=target_metadata
@@ -84,12 +76,6 @@ def do_run_migrations(connection):
 
 
 async def run_migrations_online() -> None:
-    """Run migrations in 'online' mode.
-
-    In this scenario we need to create an Engine
-    and associate a connection with the context.
-
-    """
     connectable = async_engine_from_config(
         config.get_section(config.config_ini_section, {}),
         prefix="sqlalchemy.",
