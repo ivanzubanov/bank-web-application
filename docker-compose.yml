@@ -60,9 +60,53 @@ services:
     networks:
       - bank_network
 
+  # message broker (kafka)
+  kafka:
+    image: confluentinc/cp-kafka:7.4.0
+    container_name: bank_kafka
+    ports:
+      - "9092:9092"
+    networks:
+      - bank_network
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    environment:
+      # kraft mode configuration
+      KRAFT_CONTAINER_SET_PROPERTY_UUID: "true"
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: 'broker,controller'
+      KAFKA_CONTROLLER_QUORUM_VOTERS: '1@kafka:9093'
+      KAFKA_CONTROLLER_LISTENER_NAMES: 'CONTROLLER'
+      CLUSTER_ID: '4L62IdtzQvOmCZMv05_6dQ'
+
+      # network listeners
+      # 9092 - localhost, 9094 - internal docker network
+      KAFKA_LISTENERS: 'PLAINTEXT://0.0.0.0:9092,CLUSTER://0.0.0.0:9094,CONTROLLER://0.0.0.0:9093'
+      KAFKA_ADVERTISED_LISTENERS: 'PLAINTEXT://localhost:9092,CLUSTER://kafka:9094'
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: 'CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,CLUSTER:PLAINTEXT'
+      KAFKA_INTER_BROKER_LISTENER_NAME: 'CLUSTER'
+
+      # offsets & logs
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_LOG_DIRS: '/var/lib/kafka/data'
+
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
+
+      # automatic topic creation
+      # format: "topic_name:partitions:replicas"
+      KAFKA_CREATE_TOPICS: >
+        email_verification:1:1,
+        user_status_events:1:1,
+        transaction_receipts:1:1,
+        admin_mass_mail:1:1,
+        email_verification_dlq:1:1
+
 volumes:
   auth_db_data:
   wallet_db_data:
+  kafka_data:
 
 networks:
   bank_network:

@@ -1,0 +1,38 @@
+import enum
+from datetime import date
+from typing import Optional
+from sqlalchemy import String, Enum, CheckConstraint, Date
+from sqlalchemy.orm import Mapped, mapped_column
+
+from database import Base
+
+class UserRole(str, enum.Enum):
+    USER = "USER"
+    ADMIN = "ADMIN"
+
+class UserTable(Base):
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    username: Mapped[str] = mapped_column(String(50), unique=True, nullable=False)
+    hashed_password: Mapped[str] = mapped_column(String(60), nullable=False)
+    email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
+    phone: Mapped[str] = mapped_column(String(50), unique=True, nullable=False)
+    birth_date: Mapped[date] = mapped_column(Date, nullable=False)
+
+    first_name: Mapped[str] = mapped_column(String(50), nullable=False)
+    last_name: Mapped[str] = mapped_column(String(50), nullable=False)
+    patronymic: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+
+    is_active: Mapped[bool] = mapped_column(default=False, server_default="false")
+
+    role: Mapped[UserRole] = mapped_column(
+        Enum(UserRole, name="user_role_enum", create_type=True),
+        default=UserRole.USER,
+        server_default=UserRole.USER.value,
+        nullable=False
+    )
+
+    __table_args__ = (
+        CheckConstraint("birth_date <= CURRENT_DATE - INTERVAL '14 years'", name="check_user_age_min"),
+    )
