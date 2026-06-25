@@ -11,6 +11,7 @@ class UserRegisterSchema(BaseModel):
     email: EmailStr
     phone: str
     birth_date: date
+
     first_name: str = Field(..., min_length=1, max_length=50)
     last_name: str = Field(..., min_length=1, max_length=50)
     patronymic: Optional[str] = Field(None, max_length=50)
