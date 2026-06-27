@@ -37,3 +37,7 @@ class UserRegisterSchema(BaseModel):
         if value > max_birth_date:
             raise ValueError("Регистрация доступна только с 14 лет")
         return value
+
+class UserVerifySchema(BaseModel):
+    user_id: int
+    code: str = Field(..., min_length=6, max_length=6, description="6-digit OTP code")

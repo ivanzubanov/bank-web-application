@@ -23,7 +23,7 @@ sys.modules.pop('database', None)
 
 from config import settings
 from database import Base
-from models import UserTable
+from models import UserTable, UserRefreshTokenTable
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.

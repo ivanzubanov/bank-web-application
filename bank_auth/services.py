@@ -1,7 +1,7 @@
 import json
 import uuid
 import clients
-from schemas import UserRegisterSchema
+from schemas import UserRegisterSchema, UserVerifySchema
 from models import UserTable
 from utils import hash_password, generate_otp
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -73,4 +73,51 @@ async def register_new_user(
         )
 
     return new_user
+
+async def verify_user_otp(data: UserVerifySchema, db: AsyncSession):
+    redis_key = f"otp:{data.user_id}"
+    saved_code = clients.redis_client.get(redis_key)
+
+    if not saved_code:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="OTP code expired or never existed"
+        )
+
+    if saved_code != data.code:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid OTP code"
+        )
+
+    query = select(UserTable).where(UserTable.id == data.user_id)
+    result = await db.execute(query)
+    user = result.scalar_one_or_none()
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found"
+        )
+
+    user.is_active = True
+    await db.commit()
+
+    await clients.redis_client.delete(redis_key)
+
+    try:
+        event_data = {
+            "event_id": str(uuid.uuid4()),
+            "user_id": user.id,
+            "username": user.username,
+            "email": user.email
+        }
+        await clients.kafka_producer.send_and_wait(
+            topic="user_activated",
+            value=json.dumps(event_data).encode("utf-8")
+        )
+        print(f"INTERNAL: Event UserActivated is sent for user {user.id}")
+    except Exception as e:
+        print(f"❌ KAFKA ERROR (UserActivated): {e}")
+
+    return {"message": "Account successfully activated"}
 

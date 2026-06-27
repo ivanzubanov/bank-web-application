@@ -1,7 +1,8 @@
 import enum
+from datetime import datetime, timezone
 from datetime import date
 from typing import Optional
-from sqlalchemy import String, Enum, CheckConstraint, Date
+from sqlalchemy import String, Enum, CheckConstraint, Date, ForeignKey, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from database import Base
@@ -36,3 +37,11 @@ class UserTable(Base):
     __table_args__ = (
         CheckConstraint("birth_date <= CURRENT_DATE - INTERVAL '14 years'", name="check_user_age_min"),
     )
+
+class UserRefreshTokenTable(Base):
+    __tablename__ = "user_refresh_tokens"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    token: Mapped[str] = mapped_column(String(512), nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(default=lambda: datetime.now(timezone.utc))
