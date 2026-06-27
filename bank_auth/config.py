@@ -20,12 +20,12 @@ class Settings(BaseSettings):
 
     @property
     def private_key(self) -> str:
-        with open(os.path.join(CERTS_DIR, "private.pem"), "r") as f:
+        with open(os.path.join(CERTS_DIR, "private_key.pem"), "r") as f:
             return f.read()
 
     @property
     def public_key(self) -> str:
-        with open(os.path.join(CERTS_DIR, "public.pem"), "r") as f:
+        with open(os.path.join(CERTS_DIR, "public_key.pem"), "r") as f:
             return f.read()
 
 settings = Settings()

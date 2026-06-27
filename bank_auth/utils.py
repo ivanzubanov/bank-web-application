@@ -5,6 +5,7 @@ import jwt
 import string
 from secrets import choice
 from config import settings
+from fastapi import HTTPException, status
 from bcrypt import gensalt, hashpw, checkpw
 
 def hash_password(password: str) -> str:
@@ -35,3 +36,18 @@ def create_jwt_token(
     })
 
     return jwt.encode(to_encode, settings.private_key, algorithm="RS256")
+
+def decode_jwt_token(token: str) -> dict:
+    try:
+        payload = jwt.decode(token, settings.public_key, algorithms=["RS256"])
+        return payload
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token has expired"
+        )
+    except jwt.InvalidTokenError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token"
+        )

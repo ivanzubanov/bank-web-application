@@ -1,11 +1,11 @@
 import json
 import uuid
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 import clients
-from schemas import UserRegisterSchema, UserVerifySchema, OTPResendSchema, UserLoginSchema, TokenResponseSchema
+from schemas import UserRegisterSchema, UserVerifySchema, OTPResendSchema, UserLoginSchema, TokenResponseSchema, RefreshTokenRequestSchema
 from models import UserTable, UserRefreshTokenTable
-from utils import hash_password, generate_otp, verify_password, create_jwt_token
+from utils import hash_password, generate_otp, verify_password, create_jwt_token, decode_jwt_token
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, or_
 from fastapi import HTTPException, status
@@ -187,6 +187,43 @@ async def login_user(
     await db.commit()
 
     return TokenResponseSchema(access_token=access_token, refresh_token=refresh_token)
+
+async def refresh_user_tokens(
+        data: RefreshTokenRequestSchema,
+        db: AsyncSession
+) -> TokenResponseSchema:
+
+    payload = decode_jwt_token(data.refresh_token)
+
+    if payload.get("type") != "refresh":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token type"
+        )
+    user_id = int(payload.get("sub"))
+
+    query = select(UserRefreshTokenTable).where(UserRefreshTokenTable.token == data.refresh_token)
+    result = await db.execute(query)
+    db_token = result.scalar_one_or_none()
+
+    if not db_token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Refresh token not found or already revoked"
+        )
+
+    await db.delete(db_token)
+
+    user_payload = {"sub": str(user_id), "role": payload.get("role", "USER")}
+    new_access_token = create_jwt_token(user_payload, timedelta(minutes=15))
+    new_refresh_token = create_jwt_token(user_payload, timedelta(days=30), is_refresh=True)
+
+    new_db_token = UserRefreshTokenTable(user_id=user_id, token=new_refresh_token)
+    db.add(new_db_token)
+
+    await db.commit()
+
+    return TokenResponseSchema(access_token=new_access_token, refresh_token=new_refresh_token)
 
 
 
