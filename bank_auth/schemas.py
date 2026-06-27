@@ -1,7 +1,7 @@
 import re
 from datetime import date, timedelta
 from typing import Optional
-from pydantic import BaseModel, EmailStr, Field, field_validator
+from pydantic import BaseModel, EmailStr, Field, field_validator, ConfigDict
 
 PHONE_REGEX = re.compile(r"^\+\d{11,15}$")
 
@@ -41,3 +41,17 @@ class UserRegisterSchema(BaseModel):
 class UserVerifySchema(BaseModel):
     user_id: int
     code: str = Field(..., min_length=6, max_length=6, description="6-digit OTP code")
+
+class OTPResendSchema(BaseModel):
+    user_id: int
+
+class UserLoginSchema(BaseModel):
+    username_or_email: str
+    password: str
+
+class TokenResponseSchema(BaseModel):
+    access_token: str
+    refresh_token: str
+    token_type: str = "Bearer"
+
+    model_config = ConfigDict(from_attributes=True)

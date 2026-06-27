@@ -1,9 +1,7 @@
 from fastapi import APIRouter
 
-from bank_auth.schemas import UserVerifySchema
-from bank_auth.services import verify_user_otp
-from services import register_new_user
-from schemas import UserRegisterSchema, UserVerifySchema
+from services import register_new_user, user_resend_otp, verify_user_otp, login_user
+from schemas import UserRegisterSchema, UserVerifySchema, OTPResendSchema, UserLoginSchema
 from sqlalchemy.ext.asyncio import AsyncSession
 from database import get_db
 from fastapi import Depends
@@ -26,3 +24,17 @@ async def verify_user_otp_endpoint(
         db: AsyncSession = Depends(get_db)
 ):
     return await verify_user_otp(data, db)
+
+@router.post("/verify-otp/resend")
+async def user_resend_otp_endpoint(
+        data: OTPResendSchema,
+        db: AsyncSession = Depends(get_db)
+):
+    return await user_resend_otp(data, db)
+
+@router.post("/login")
+async def login_user_endpoint(
+        data: UserLoginSchema,
+        db: AsyncSession = Depends(get_db)
+):
+    return await login_user(data, db)

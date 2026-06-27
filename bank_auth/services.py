@@ -1,12 +1,46 @@
 import json
 import uuid
+from datetime import datetime, timedelta
+
 import clients
-from schemas import UserRegisterSchema, UserVerifySchema
-from models import UserTable
-from utils import hash_password, generate_otp
+from schemas import UserRegisterSchema, UserVerifySchema, OTPResendSchema, UserLoginSchema, TokenResponseSchema
+from models import UserTable, UserRefreshTokenTable
+from utils import hash_password, generate_otp, verify_password, create_jwt_token
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, or_
 from fastapi import HTTPException, status
+
+
+async def _generate_and_send_otp(user: UserTable) -> str:
+    """
+    Helper function to generate an OTP, save it to Redis, and send it to Kafka.
+    Returns the generated code.
+    """
+    code = generate_otp()
+    redis_key = f"otp:{user.id}"
+
+    await clients.redis_client.set(name=redis_key, value=code, ex=300)
+
+    try:
+        event_data = {
+            "event_id": str(uuid.uuid4()),
+            "email": user.email,
+            "otp_code": code,
+            "username": user.username
+        }
+        await clients.kafka_producer.send_and_wait(
+            topic="email_verification",
+            value=json.dumps(event_data).encode("utf-8")
+        )
+        print(f"INTERNAL: Verification event sent to Kafka for {user.email}")
+    except Exception as e:
+        print(f"❌ KAFKA SEND ERROR: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error sending notification. Please, try again later"
+        )
+
+    return code
 
 async def register_new_user(
         user_data: UserRegisterSchema,
@@ -46,37 +80,13 @@ async def register_new_user(
     await db.commit()
     await db.refresh(new_user)
 
-    code = generate_otp()
-    await clients.redis_client.set(name=f"otp:{new_user.id}", value=code, ex=300)
-
-    try:
-        event_data = {
-            "event_id": str(uuid.uuid4()),
-            "email": new_user.email,
-            "otp_code": code,
-            "username": new_user.username
-        }
-
-        message_bytes = json.dumps(event_data).encode("utf-8")
-
-        await clients.kafka_producer.send_and_wait(
-            topic="email_verification",
-            value=message_bytes
-        )
-        print(f"INTERNAL: Verification event sent to Kafka for {new_user.email}")
-
-    except Exception as e:
-        print(f"❌ KAFKA SEND ERROR: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Error sending notification. Please, try again later"
-        )
+    await _generate_and_send_otp(new_user)
 
     return new_user
 
 async def verify_user_otp(data: UserVerifySchema, db: AsyncSession):
     redis_key = f"otp:{data.user_id}"
-    saved_code = clients.redis_client.get(redis_key)
+    saved_code = await clients.redis_client.get(redis_key)
 
     if not saved_code:
         raise HTTPException(
@@ -120,4 +130,63 @@ async def verify_user_otp(data: UserVerifySchema, db: AsyncSession):
         print(f"❌ KAFKA ERROR (UserActivated): {e}")
 
     return {"message": "Account successfully activated"}
+
+async def user_resend_otp(data: OTPResendSchema, db: AsyncSession):
+    query = select(UserTable).where(UserTable.id == data.user_id)
+    result = await db.execute(query)
+    user = result.scalar_one_or_none()
+
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found"
+        )
+
+    if user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="User is already active"
+        )
+
+    await _generate_and_send_otp(user)
+    return {"message": "New OTP code sent successfully"}
+
+async def login_user(
+        data: UserLoginSchema,
+        db: AsyncSession
+):
+    query = select(UserTable).where(or_(
+        UserTable.username == data.username_or_email,
+        UserTable.email == data.username_or_email
+    ))
+    result = await db.execute(query)
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid email/username"
+        )
+    if not verify_password(data.password, user.hashed_password):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid password"
+        )
+    if not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Account is not activated. Please verify your OTP first"
+        )
+
+    user_payload = {"sub": str(user.id), "role": user.role}
+
+    access_token = create_jwt_token(user_payload, timedelta(minutes=15))
+    refresh_token = create_jwt_token(user_payload, timedelta(days=30), is_refresh=True)
+
+    db_refresh = UserRefreshTokenTable(user_id=user.id, token=refresh_token)
+    db.add(db_refresh)
+    await db.commit()
+
+    return TokenResponseSchema(access_token=access_token, refresh_token=refresh_token)
+
+
 
