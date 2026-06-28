@@ -9,6 +9,9 @@ class Settings(BaseSettings):
     AUTH_DB_PASSWORD: str
     AUTH_DB_NAME: str
 
+    AUTH_DB_HOST: str = "localhost"
+    AUTH_DB_PORT: int = 54311
+
     REDIS_URL: str
     KAFKA_BOOTSTRAP_SERVERS: str
 

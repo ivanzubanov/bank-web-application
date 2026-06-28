@@ -12,16 +12,18 @@ from sqlalchemy.ext.asyncio import (
 )
 from httpx import AsyncClient, ASGITransport
 
-from bank_auth.main import app as auth_app
-from bank_auth.database import get_db
-
-# paths
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-if PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, PROJECT_ROOT)
+BANK_AUTH_DIR = os.path.join(PROJECT_ROOT, "bank_auth")
+
+for path in [PROJECT_ROOT, BANK_AUTH_DIR]:
+    if path not in sys.path:
+        sys.path.insert(0, path)
 
 from dotenv import load_dotenv
 load_dotenv(os.path.join(PROJECT_ROOT, ".env"))
+
+from bank_auth.main import app as auth_app
+from database import get_db
 
 from bank_auth.config import settings as auth_settings
 from bank_wallet.config import settings as wallet_settings
@@ -29,12 +31,13 @@ from bank_wallet.config import settings as wallet_settings
 TEST_AUTH_DB_URL = (
     f"postgresql+asyncpg://"
     f"{auth_settings.AUTH_DB_USER}:{auth_settings.AUTH_DB_PASSWORD}"
-    f"@localhost:54311/{auth_settings.AUTH_DB_NAME}_test"
+    f"@{auth_settings.AUTH_DB_HOST}:{auth_settings.AUTH_DB_PORT}/{auth_settings.AUTH_DB_NAME}_test"
 )
+
 TEST_WALLET_DB_URL = (
     f"postgresql+asyncpg://"
     f"{wallet_settings.WALLET_DB_USER}:{wallet_settings.WALLET_DB_PASSWORD}"
-    f"@localhost:54312/{wallet_settings.WALLET_DB_NAME}_test"
+    f"@{getattr(wallet_settings, 'WALLET_DB_HOST', 'localhost')}:{getattr(wallet_settings, 'WALLET_DB_PORT', 54312)}/{wallet_settings.WALLET_DB_NAME}_test"
 )
 
 
@@ -105,6 +108,6 @@ async def ac():
 
 @pytest_asyncio.fixture(scope="function", autouse=True)
 async def clean_tables():
-    yield
     async with test_engine.begin() as conn:
         await conn.execute(text("TRUNCATE TABLE users CASCADE;"))
+    yield
