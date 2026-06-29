@@ -1,9 +1,10 @@
 from fastapi import APIRouter, Depends
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bank_auth.services import (
     register_new_user, user_resend_otp, verify_user_otp,
-    login_user, refresh_user_tokens
+    login_user, refresh_user_tokens, logout_user
 )
 from bank_auth.schemas import (
     UserRegisterSchema, UserVerifySchema, OTPResendSchema,
@@ -15,6 +16,8 @@ router = APIRouter(
     prefix="/auth",
     tags=["Auth"]
 )
+
+security = HTTPBearer()
 
 @router.post("/register")
 async def register_new_user_endpoint(user_data: UserRegisterSchema, db: AsyncSession = Depends(get_db)):
@@ -35,3 +38,11 @@ async def login_user_endpoint(data: UserLoginSchema, db: AsyncSession = Depends(
 @router.post("/refresh", response_model=TokenResponseSchema)
 async def refresh_user_tokens_endpoint(data: RefreshTokenRequestSchema, db: AsyncSession = Depends(get_db)):
     return await refresh_user_tokens(data, db)
+
+@router.post("/logout")
+async def logout_user_endpoint(
+        data: RefreshTokenRequestSchema,
+        credentials: HTTPAuthorizationCredentials = Depends(security),
+        db: AsyncSession = Depends(get_db)
+):
+    return await logout_user(data, credentials, db)

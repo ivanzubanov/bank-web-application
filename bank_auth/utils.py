@@ -6,6 +6,7 @@ import jwt
 import string
 from secrets import choice
 from bank_auth.config import settings
+from bank_auth import clients
 from fastapi import HTTPException, status
 from bcrypt import gensalt, hashpw, checkpw
 
@@ -39,7 +40,12 @@ def create_jwt_token(
 
     return jwt.encode(to_encode, settings.private_key, algorithm="RS256")
 
-def decode_jwt_token(token: str) -> dict:
+async def decode_jwt_token(token: str) -> dict:
+    if await clients.redis_client.exists(f"blacklist:{token}"):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Access denied"
+        )
     try:
         payload = jwt.decode(token, settings.public_key, algorithms=["RS256"])
         return payload

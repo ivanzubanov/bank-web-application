@@ -297,12 +297,95 @@ async def test_refresh_tokens_success(ac: AsyncClient):
         session.add(db_token)
         await session.commit()
 
-    with patch("bank_auth.clients.redis_client", new_callable=AsyncMock), \
+    # Именуем mock_redis, чтобы настроить его поведение
+    with patch("bank_auth.clients.redis_client", new_callable=AsyncMock) as mock_redis, \
             patch("bank_auth.clients.kafka_producer", new_callable=AsyncMock):
+        # Говорим, что токена нет в блеклисте Redis
+        mock_redis.exists.return_value = False
+
         response = await ac.post("/auth/refresh", json={"refresh_token": refresh_token})
+
     assert response.status_code == status.HTTP_200_OK
 
     data = response.json()
     assert "access_token" in data
     assert "refresh_token" in data
     assert data["refresh_token"] != refresh_token
+
+
+@pytest.mark.asyncio
+async def test_logout_success(ac: AsyncClient):
+    async with TestingSessionLocal() as session:
+        user = UserTable(
+            username="logout_warrior", email="logout_flow@example.com",
+            hashed_password="123", phone="+375299990011",
+            birth_date=datetime.date(1990, 1, 1), first_name="A", last_name="B",
+            is_active=True
+        )
+        session.add(user)
+        await session.commit()
+        await session.refresh(user)
+
+        user_payload = {"sub": str(user.id), "role": user.role}
+        access_token = create_jwt_token(user_payload, datetime.timedelta(minutes=15))
+        refresh_token = create_jwt_token(user_payload, datetime.timedelta(days=30), is_refresh=True)
+
+        db_token = UserRefreshTokenTable(user_id=user.id, token=refresh_token)
+        session.add(db_token)
+        await session.commit()
+
+    headers = {"Authorization": f"Bearer {access_token}"}
+    logout_payload = {"refresh_token": refresh_token}
+
+    with patch("bank_auth.clients.redis_client", new_callable=AsyncMock) as mock_redis:
+        response = await ac.post("/auth/logout", json=logout_payload, headers=headers)
+
+        assert response.status_code == status.HTTP_200_OK
+        assert response.json()["detail"] == "Successfully logged out"
+
+        assert mock_redis.set.called
+        called_key = mock_redis.set.call_args[1].get('name') or mock_redis.set.call_args[0][0]
+        assert called_key == f"blacklist:{access_token}"
+
+    async with TestingSessionLocal() as session:
+        from sqlalchemy import select
+        query = select(UserRefreshTokenTable).where(UserRefreshTokenTable.token == refresh_token)
+        result = await session.execute(query)
+        assert result.scalar_one_or_none() is None
+
+
+@pytest.mark.asyncio
+async def test_logout_invalid_access_token_failure(ac: AsyncClient):
+    headers = {"Authorization": "Bearer invalid_and_broken_token_string"}
+    logout_payload = {"refresh_token": "some_refresh_token"}
+
+    response = await ac.post("/auth/logout", json=logout_payload, headers=headers)
+    assert response.status_code == status.HTTP_401_UNAUTHORIZED
+    assert response.json()["detail"] == "Invalid token"
+
+
+@pytest.mark.asyncio
+async def test_logout_wrong_token_type_failure(ac: AsyncClient):
+    user_payload = {"sub": "1", "role": "USER"}
+    refresh_token_as_access = create_jwt_token(user_payload, datetime.timedelta(days=30), is_refresh=True)
+
+    headers = {"Authorization": f"Bearer {refresh_token_as_access}"}
+    logout_payload = {"refresh_token": refresh_token_as_access}
+
+    response = await ac.post("/auth/logout", json=logout_payload, headers=headers)
+    assert response.status_code == status.HTTP_401_UNAUTHORIZED
+    assert response.json()["detail"] == "Invalid token type"
+
+
+@pytest.mark.asyncio
+async def test_logout_refresh_token_not_found_failure(ac: AsyncClient):
+    user_payload = {"sub": "1", "role": "USER"}
+    access_token = create_jwt_token(user_payload, datetime.timedelta(minutes=15))
+    non_existent_refresh = create_jwt_token(user_payload, datetime.timedelta(days=30), is_refresh=True)
+
+    headers = {"Authorization": f"Bearer {access_token}"}
+    logout_payload = {"refresh_token": non_existent_refresh}
+
+    response = await ac.post("/auth/logout", json=logout_payload, headers=headers)
+    assert response.status_code == status.HTTP_401_UNAUTHORIZED
+    assert "Invalid or already revoked refresh token" in response.json()["detail"]

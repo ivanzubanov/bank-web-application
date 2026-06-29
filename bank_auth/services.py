@@ -1,7 +1,9 @@
+import jwt
 import json
 import uuid
-from datetime import timedelta
+from datetime import timedelta, datetime, timezone
 
+from bank_auth.config import settings
 from bank_auth import clients
 from bank_auth.schemas import (
     UserRegisterSchema, UserVerifySchema, OTPResendSchema,
@@ -16,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, or_
 from sqlalchemy.exc import IntegrityError
 from fastapi import HTTPException, status
-
+from fastapi.security import HTTPAuthorizationCredentials
 
 async def _generate_and_send_otp(user: UserTable) -> str:
     code = generate_otp()
@@ -138,8 +140,8 @@ async def verify_user_otp(data: UserVerifySchema, db: AsyncSession):
         )
         print(f"INTERNAL: Event UserActivated is sent for user {user.id}")
 
-        await db.commit()
         await clients.redis_client.delete(redis_key)
+        await db.commit()
 
         return {"message": "Account successfully activated"}
 
@@ -210,7 +212,7 @@ async def login_user(data: UserLoginSchema, db: AsyncSession):
 
 
 async def refresh_user_tokens(data: RefreshTokenRequestSchema, db: AsyncSession) -> TokenResponseSchema:
-    payload = decode_jwt_token(data.refresh_token)
+    payload = await decode_jwt_token(data.refresh_token)
 
     if payload.get("type") != "refresh":
         raise HTTPException(
@@ -241,3 +243,51 @@ async def refresh_user_tokens(data: RefreshTokenRequestSchema, db: AsyncSession)
     await db.commit()
 
     return TokenResponseSchema(access_token=new_access_token, refresh_token=new_refresh_token)
+
+
+async def logout_user(
+        refresh_token: RefreshTokenRequestSchema,
+        credentials: HTTPAuthorizationCredentials,
+        db: AsyncSession
+):
+    access_token = credentials.credentials
+    try:
+        payload = jwt.decode(
+            access_token,
+            settings.public_key,
+            algorithms=["RS256"],
+            options={"verify_exp": False}
+        )
+    except jwt.InvalidTokenError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token"
+        )
+
+    if payload.get("type") != "access":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token type"
+        )
+
+    query = select(UserRefreshTokenTable).where(UserRefreshTokenTable.token == refresh_token.refresh_token)
+    result = await db.execute(query)
+    current_refresh_token = result.scalar_one_or_none()
+    if not current_refresh_token:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid or already revoked refresh token"
+        )
+    await db.delete(current_refresh_token)
+
+    exp_timestamp = payload.get("exp")
+    current_timestamp = datetime.now(timezone.utc).timestamp()
+    remaining_ttl = exp_timestamp - current_timestamp
+    if remaining_ttl > 0:
+        ttl_seconds = int(remaining_ttl) + 1
+        redis_key = f"blacklist:{access_token}"
+        await clients.redis_client.set(redis_key, "1", ex=ttl_seconds)
+
+    await db.commit()
+
+    return {"detail": "Successfully logged out"}
