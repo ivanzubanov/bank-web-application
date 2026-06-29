@@ -1,4 +1,5 @@
-from os.path import abspath, dirname, join
+# migrations_wallet/env.py
+import os
 import sys
 import asyncio
 from logging.config import fileConfig
@@ -6,55 +7,36 @@ from logging.config import fileConfig
 from sqlalchemy.ext.asyncio import async_engine_from_config
 from sqlalchemy import pool
 from alembic import context
-from dotenv import load_dotenv
 
-current_dir = dirname(abspath(__file__))
-project_root = dirname(current_dir)
-wallet_service_path = join(project_root, 'bank_wallet')
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(CURRENT_DIR)
 
-load_dotenv(join(project_root, '.env'))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
-if wallet_service_path not in sys.path:
-    sys.path.insert(0, wallet_service_path)
+from bank_wallet.config import settings
+from bank_wallet.database import Base
 
-# monorepo pytest solution
-sys.modules.pop('config', None)
-sys.modules.pop('database', None)
+alembic_config = context.config
 
-from config import settings
-from database import Base
+if alembic_config.config_file_name is not None:
+    fileConfig(alembic_config.config_file_name)
 
-# this is the Alembic Config object, which provides
-# access to the values within the .ini file in use.
-config = context.config
-
-# Interpret the config file for Python logging.
-# This line sets up loggers basically.
-if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
-
-# add your model's MetaData object here
-# for 'autogenerate' support
-# from myapp import mymodel
-# target_metadata = mymodel.Base.metadata
 target_metadata = Base.metadata
 
-DATABASE_URL = (
-    f"postgresql+asyncpg://"
-    f"{settings.WALLET_DB_USER}:{settings.WALLET_DB_PASSWORD}"
-    f"@localhost:54312/{settings.WALLET_DB_NAME}"
-)
+cmd_line_url = alembic_config.get_main_option("sqlalchemy.url")
 
-config.set_main_option("sqlalchemy.url", DATABASE_URL)
-
-# other values from the config, defined by the needs of env.py,
-# can be acquired:
-# my_important_option = config.get_main_option("my_important_option")
-# ... etc.
+if not cmd_line_url or "placeholder" in cmd_line_url or "user:pass" in cmd_line_url:
+    DATABASE_URL = (
+        f"postgresql+asyncpg://"
+        f"{settings.WALLET_DB_USER}:{settings.WALLET_DB_PASSWORD}"
+        f"@{getattr(settings, 'WALLET_DB_HOST', 'localhost')}:{getattr(settings, 'WALLET_DB_PORT', 54312)}/{settings.WALLET_DB_NAME}"
+    )
+    alembic_config.set_main_option("sqlalchemy.url", DATABASE_URL)
 
 
 def run_migrations_offline() -> None:
-    url = config.get_main_option("sqlalchemy.url")
+    url = alembic_config.get_main_option("sqlalchemy.url")
     context.configure(
         url=url,
         target_metadata=target_metadata,
@@ -77,7 +59,7 @@ def do_run_migrations(connection):
 
 async def run_migrations_online() -> None:
     connectable = async_engine_from_config(
-        config.get_section(config.config_ini_section, {}),
+        alembic_config.get_section(alembic_config.config_ini_section, {}),
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
     )

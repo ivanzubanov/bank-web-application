@@ -1,4 +1,5 @@
 import os
+from functools import cached_property, cache
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -21,12 +22,12 @@ class Settings(BaseSettings):
         extra="ignore"
     )
 
-    @property
+    @cached_property
     def private_key(self) -> str:
         with open(os.path.join(CERTS_DIR, "private_key.pem"), "r") as f:
             return f.read()
 
-    @property
+    @cached_property
     def public_key(self) -> str:
         with open(os.path.join(CERTS_DIR, "public_key.pem"), "r") as f:
             return f.read()

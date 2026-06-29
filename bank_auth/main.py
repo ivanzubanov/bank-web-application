@@ -1,17 +1,11 @@
-import os
-import sys
-
-CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
-if CURRENT_DIR not in sys.path:
-    sys.path.insert(0, CURRENT_DIR)
-
-import clients
-from router import router
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
-from config import settings
 from redis.asyncio import from_url
 from aiokafka import AIOKafkaProducer
+
+from bank_auth import clients
+from bank_auth.router import router
+from bank_auth.config import settings
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -25,7 +19,6 @@ async def lifespan(app: FastAPI):
     clients.kafka_producer = AIOKafkaProducer(
         bootstrap_servers=settings.KAFKA_BOOTSTRAP_SERVERS
     )
-
     await clients.kafka_producer.start()
     print("Infrastructure clients have been successfully launched.")
 
@@ -34,12 +27,9 @@ async def lifespan(app: FastAPI):
     print("Closing connections...")
     if clients.redis_client:
         await clients.redis_client.close()
-
     if clients.kafka_producer:
         await clients.kafka_producer.stop()
-
     print("The 'bank_auth' application has been successfully stopped.")
 
 app = FastAPI(title="Bank Authentication Service", lifespan=lifespan)
-
 app.include_router(router)

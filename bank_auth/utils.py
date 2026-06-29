@@ -1,10 +1,11 @@
 import datetime
 from datetime import timezone
 
+import uuid
 import jwt
 import string
 from secrets import choice
-from config import settings
+from bank_auth.config import settings
 from fastapi import HTTPException, status
 from bcrypt import gensalt, hashpw, checkpw
 
@@ -32,7 +33,8 @@ def create_jwt_token(
     expire = datetime.datetime.now(timezone.utc) + expires_delta
     to_encode.update({
         "exp": expire,
-        "type": "refresh" if is_refresh else "access"
+        "type": "refresh" if is_refresh else "access",
+        "jti": str(uuid.uuid4())
     })
 
     return jwt.encode(to_encode, settings.private_key, algorithm="RS256")

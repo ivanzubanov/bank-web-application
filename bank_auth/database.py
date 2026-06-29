@@ -1,11 +1,13 @@
-from config import settings
+from bank_auth.config import settings
 from sqlalchemy.orm import DeclarativeBase
-from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
+from sqlalchemy.ext.asyncio import (
+    create_async_engine, async_sessionmaker, AsyncSession
+)
 
 DATABASE_URL = (
     f"postgresql+asyncpg://"
     f"{settings.AUTH_DB_USER}:{settings.AUTH_DB_PASSWORD}"
-    f"@localhost:54311/{settings.AUTH_DB_NAME}"
+    f"@{settings.AUTH_DB_HOST}:{settings.AUTH_DB_PORT}/{settings.AUTH_DB_NAME}"
 )
 
 db_engine = create_async_engine(DATABASE_URL, echo=True)

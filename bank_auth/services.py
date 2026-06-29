@@ -2,56 +2,51 @@ import json
 import uuid
 from datetime import timedelta
 
-import clients
-from schemas import UserRegisterSchema, UserVerifySchema, OTPResendSchema, UserLoginSchema, TokenResponseSchema, RefreshTokenRequestSchema
-from models import UserTable, UserRefreshTokenTable
-from utils import hash_password, generate_otp, verify_password, create_jwt_token, decode_jwt_token
+from bank_auth import clients
+from bank_auth.schemas import (
+    UserRegisterSchema, UserVerifySchema, OTPResendSchema,
+    UserLoginSchema, TokenResponseSchema, RefreshTokenRequestSchema
+)
+from bank_auth.models import UserTable, UserRefreshTokenTable
+from bank_auth.utils import (
+    hash_password, generate_otp, verify_password,
+    create_jwt_token, decode_jwt_token
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, or_
+from sqlalchemy.exc import IntegrityError
 from fastapi import HTTPException, status
 
 
 async def _generate_and_send_otp(user: UserTable) -> str:
-    """
-    Helper function to generate an OTP, save it to Redis, and send it to Kafka.
-    Returns the generated code.
-    """
     code = generate_otp()
     redis_key = f"otp:{user.id}"
 
     await clients.redis_client.set(name=redis_key, value=code, ex=300)
 
-    try:
-        event_data = {
-            "event_id": str(uuid.uuid4()),
-            "email": user.email,
-            "otp_code": code,
-            "username": user.username
-        }
-        await clients.kafka_producer.send_and_wait(
-            topic="email_verification",
-            value=json.dumps(event_data).encode("utf-8")
-        )
-        print(f"INTERNAL: Verification event sent to Kafka for {user.email}")
-    except Exception as e:
-        print(f"❌ KAFKA SEND ERROR: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Error sending notification. Please, try again later"
-        )
+    event_data = {
+        "event_id": str(uuid.uuid4()),
+        "email": user.email,
+        "otp_code": code,
+        "username": user.username
+    }
 
+    await clients.kafka_producer.send_and_wait(
+        topic="email_verification",
+        value=json.dumps(event_data).encode("utf-8")
+    )
+    print(f"INTERNAL: Verification event sent to Kafka for {user.email}")
     return code
 
-async def register_new_user(
-        user_data: UserRegisterSchema,
-        db: AsyncSession
-):
+
+async def register_new_user(user_data: UserRegisterSchema, db: AsyncSession):
     query = select(UserTable).where(or_(
         UserTable.username == user_data.username,
         UserTable.email == user_data.email
     ))
     result = await db.execute(query)
     current_user = result.scalar_one_or_none()
+
     if current_user is not None:
         if current_user.username == user_data.username:
             raise HTTPException(
@@ -76,13 +71,30 @@ async def register_new_user(
         patronymic=user_data.patronymic
     )
 
-    db.add(new_user)
-    await db.commit()
-    await db.refresh(new_user)
+    try:
+        db.add(new_user)
+        await db.flush()
 
-    await _generate_and_send_otp(new_user)
+        await _generate_and_send_otp(new_user)
 
-    return new_user
+        await db.commit()
+        await db.refresh(new_user)
+        return new_user
+
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="User with this credentials already exists"
+        )
+    except Exception as e:
+        await db.rollback()
+        print(f"❌ REGISTRATION ERROR (Rolled back): {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error during registration. Please, try again later"
+        )
+
 
 async def verify_user_otp(data: UserVerifySchema, db: AsyncSession):
     redis_key = f"otp:{data.user_id}"
@@ -103,18 +115,17 @@ async def verify_user_otp(data: UserVerifySchema, db: AsyncSession):
     query = select(UserTable).where(UserTable.id == data.user_id)
     result = await db.execute(query)
     user = result.scalar_one_or_none()
+
     if user is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="User not found"
         )
 
-    user.is_active = True
-    await db.commit()
-
-    await clients.redis_client.delete(redis_key)
-
     try:
+        user.is_active = True
+        await db.flush()
+
         event_data = {
             "event_id": str(uuid.uuid4()),
             "user_id": user.id,
@@ -126,10 +137,20 @@ async def verify_user_otp(data: UserVerifySchema, db: AsyncSession):
             value=json.dumps(event_data).encode("utf-8")
         )
         print(f"INTERNAL: Event UserActivated is sent for user {user.id}")
-    except Exception as e:
-        print(f"❌ KAFKA ERROR (UserActivated): {e}")
 
-    return {"message": "Account successfully activated"}
+        await db.commit()
+        await clients.redis_client.delete(redis_key)
+
+        return {"message": "Account successfully activated"}
+
+    except Exception as e:
+        await db.rollback()
+        print(f"❌ ACTIVATION ERROR (Rolled back): {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Infrastructure error. Activation failed, please try again."
+        )
+
 
 async def user_resend_otp(data: OTPResendSchema, db: AsyncSession):
     query = select(UserTable).where(UserTable.id == data.user_id)
@@ -151,16 +172,15 @@ async def user_resend_otp(data: OTPResendSchema, db: AsyncSession):
     await _generate_and_send_otp(user)
     return {"message": "New OTP code sent successfully"}
 
-async def login_user(
-        data: UserLoginSchema,
-        db: AsyncSession
-):
+
+async def login_user(data: UserLoginSchema, db: AsyncSession):
     query = select(UserTable).where(or_(
         UserTable.username == data.username_or_email,
         UserTable.email == data.username_or_email
     ))
     result = await db.execute(query)
     user = result.scalar_one_or_none()
+
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -188,11 +208,8 @@ async def login_user(
 
     return TokenResponseSchema(access_token=access_token, refresh_token=refresh_token)
 
-async def refresh_user_tokens(
-        data: RefreshTokenRequestSchema,
-        db: AsyncSession
-) -> TokenResponseSchema:
 
+async def refresh_user_tokens(data: RefreshTokenRequestSchema, db: AsyncSession) -> TokenResponseSchema:
     payload = decode_jwt_token(data.refresh_token)
 
     if payload.get("type") != "refresh":
@@ -224,6 +241,3 @@ async def refresh_user_tokens(
     await db.commit()
 
     return TokenResponseSchema(access_token=new_access_token, refresh_token=new_refresh_token)
-
-
-
