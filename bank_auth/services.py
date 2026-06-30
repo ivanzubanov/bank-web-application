@@ -11,7 +11,7 @@ from bank_auth import clients
 from bank_auth.schemas import (
     UserRegisterSchema, UserVerifySchema, OTPResendSchema,
     UserLoginSchema, TokenResponseSchema, RefreshTokenRequestSchema,
-    UserRoleUpdateSchema, MassMailSchema
+    UserRoleUpdateSchema, MassMailSchema, UserBanSchema
 )
 from bank_auth.models import UserTable, UserRefreshTokenTable
 from bank_auth.utils import (
@@ -209,6 +209,11 @@ async def login_user(data: UserLoginSchema, db: AsyncSession):
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Account is not activated. Please verify your OTP first"
         )
+    if user.is_banned:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Your account has been blocked due to security reasons. Please contact support."
+        )
 
     user_payload = {"sub": str(user.id), "role": user.role.value}
 
@@ -322,10 +327,13 @@ async def update_user_role(user_id: int, data: UserRoleUpdateSchema, db: AsyncSe
         await db.flush()
 
         event_data = {
+            "event_type": "UserStatusChanged",
             "event_id": str(uuid.uuid4()),
             "user_id": user.id,
+            "action": "ROLE_CHANGED",
             "old_role": old_role.value,
             "new_role": user.role.value,
+            "is_banned": user.is_banned,
             "updated_at": datetime.now(timezone.utc).isoformat()
         }
 
@@ -361,7 +369,7 @@ async def mass_mail_users(data: MassMailSchema, db: AsyncSession):
         )
 
         result = await db.execute(query)
-        users = result.scalars().all()
+        users = result.scalars().all() # [user for user in result.scalars()]
 
         if not users:
             break
@@ -395,4 +403,49 @@ async def mass_mail_users(data: MassMailSchema, db: AsyncSession):
         "message": "Mass mail events have been successfully chunked and streamed to Kafka",
         "total_processed_users": total_sent
     }
+
+async def ban_user(user_id: int, data: UserBanSchema, db: AsyncSession):
+    query = select(UserTable).where(UserTable.id == user_id)
+    result = await db.execute(query)
+    user = result.scalar_one_or_none()
+
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found"
+        )
+
+    user.is_banned = data.is_banned
+    action_type = "USER_BANNED" if data.is_banned else "USER_UNBANNED"
+
+    try:
+        await db.flush()
+
+        event_data = {
+            "event_type": "UserStatusChanged",
+            "event_id": str(uuid.uuid4()),
+            "user_id": user.id,
+            "action": action_type,
+            "old_role": user.role.value,
+            "new_role": user.role.value,
+            "is_banned": user.is_banned,
+            "updated_at": datetime.now(timezone.utc).isoformat()
+        }
+
+        await clients.kafka_producer.send_and_wait(
+            topic="user_status_events",
+            value=json.dumps(event_data).encode("utf-8")
+        )
+
+        await db.commit()
+        log_message = "banned" if data.is_banned else "unbanned"
+        return {"message": f"User successfully {log_message}"}
+
+    except Exception as e:
+        await db.rollback()
+        print(f"❌ BAN/UNBAN ERROR: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Infrastructure error. Failed to change ban status."
+        )
 

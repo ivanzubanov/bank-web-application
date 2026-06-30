@@ -67,3 +67,9 @@ class UserRoleUpdateSchema(BaseModel):
 class MassMailSchema(BaseModel):
     subject: str = Field(..., min_length=1, max_length=255, description="Message subject")
     body: str = Field(..., min_length=1, description="Message text (supports HTML or plain text)")
+
+# bank_auth/schemas.py
+# ... (в конец файла)
+
+class UserBanSchema(BaseModel):
+    is_banned: bool = Field(..., description="True for ban, False for unban")

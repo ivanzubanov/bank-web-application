@@ -26,6 +26,7 @@ class UserTable(Base):
     patronymic: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
 
     is_active: Mapped[bool] = mapped_column(default=False, server_default="false")
+    is_banned: Mapped[bool] = mapped_column(default=False, server_default="false", nullable=False)
 
     role: Mapped[UserRole] = mapped_column(
         Enum(UserRole, name="user_role_enum", create_type=True),

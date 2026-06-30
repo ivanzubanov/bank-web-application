@@ -699,3 +699,195 @@ async def test_mass_mail_unauthorized(ac: AsyncClient):
     }
     response = await ac.post("/admin/mass-mail", json=mail_payload)
     assert response.status_code == status.HTTP_403_FORBIDDEN
+
+# BAN USER
+
+@pytest.mark.asyncio
+async def test_ban_user_success(ac: AsyncClient):
+    async with TestingSessionLocal() as session:
+        admin = UserTable(
+            username="admin_security",
+            email="admin_sec@example.com",
+            hashed_password="123",
+            phone="+375297111111",
+            birth_date=datetime.date(1990, 1, 1),
+            first_name="Admin",
+            last_name="Security",
+            is_active=True,
+            role=UserRole.ADMIN,
+        )
+        target = UserTable(
+            username="bad_user",
+            email="bad@example.com",
+            hashed_password="123",
+            phone="+375297222222",
+            birth_date=datetime.date(1995, 1, 1),
+            first_name="Bad",
+            last_name="User",
+            is_active=True,
+            role=UserRole.USER,
+            is_banned=False,
+        )
+        session.add_all([admin, target])
+        await session.commit()
+        await session.refresh(admin)
+        await session.refresh(target)
+        admin_id = admin.id
+        target_id = target.id
+
+    admin_payload = {"sub": str(admin_id), "role": UserRole.ADMIN.value}
+    access_token = create_jwt_token(admin_payload, datetime.timedelta(minutes=15))
+    headers = {"Authorization": f"Bearer {access_token}"}
+
+    with patch(
+        "bank_auth.clients.redis_client", new_callable=AsyncMock
+    ) as mock_redis, patch(
+        "bank_auth.clients.kafka_producer", new_callable=AsyncMock
+    ) as mock_kafka:
+        mock_redis.exists.return_value = False
+
+        response = await ac.patch(
+            f"/admin/users/{target_id}/ban",
+            json={"is_banned": True},
+            headers=headers,
+        )
+
+        assert response.status_code == status.HTTP_200_OK
+        assert mock_kafka.send_and_wait.called
+
+    async with TestingSessionLocal() as session:
+        query = select(UserTable).where(UserTable.id == target_id)
+        result = await session.execute(query)
+        updated_user = result.scalar_one()
+        assert updated_user.is_banned is True
+
+
+@pytest.mark.asyncio
+async def test_ban_user_forbidden_for_regular_user(ac: AsyncClient):
+    async with TestingSessionLocal() as session:
+        regular = UserTable(
+            username="hacker_wanna_be",
+            email="hacker@example.com",
+            hashed_password="123",
+            phone="+375297333333",
+            birth_date=datetime.date(1990, 1, 1),
+            first_name="Hacker",
+            last_name="User",
+            is_active=True,
+            role=UserRole.USER,
+        )
+        session.add(regular)
+        await session.commit()
+        await session.refresh(regular)
+        regular_id = regular.id
+
+    regular_payload = {"sub": str(regular_id), "role": UserRole.USER.value}
+    access_token = create_jwt_token(regular_payload, datetime.timedelta(minutes=15))
+    headers = {"Authorization": f"Bearer {access_token}"}
+
+    with patch(
+        "bank_auth.clients.redis_client", new_callable=AsyncMock
+    ) as mock_redis:
+        mock_redis.exists.return_value = False
+
+        response = await ac.patch(
+            f"/admin/users/{regular_id}/ban",
+            json={"is_banned": True},
+            headers=headers,
+        )
+
+        assert response.status_code == status.HTTP_403_FORBIDDEN
+
+
+@pytest.mark.asyncio
+async def test_login_banned_user_forbidden(ac: AsyncClient):
+    async with TestingSessionLocal() as session:
+        banned_user = UserTable(
+            username="banned_warrior",
+            email="banned@example.com",
+            hashed_password="123",
+            phone="+375297444444",
+            birth_date=datetime.date(1990, 1, 1),
+            first_name="Banned",
+            last_name="User",
+            is_active=True,
+            is_banned=True,
+        )
+        from bank_auth.utils import hash_password
+
+        banned_user.hashed_password = hash_password("password123")
+        session.add(banned_user)
+        await session.commit()
+
+    login_payload = {
+        "username_or_email": "banned_warrior",
+        "password": "password123",
+    }
+
+    with patch(
+        "bank_auth.clients.redis_client", new_callable=AsyncMock
+    ), patch("bank_auth.clients.kafka_producer", new_callable=AsyncMock):
+        response = await ac.post("/auth/login", json=login_payload)
+
+    assert response.status_code == status.HTTP_403_FORBIDDEN
+    assert "blocked due to security reasons" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_ban_user_infrastructure_failure_rollback(ac: AsyncClient):
+    async with TestingSessionLocal() as session:
+        admin = UserTable(
+            username="admin_security_fail",
+            email="admin_fail@example.com",
+            hashed_password="123",
+            phone="+375297555555",
+            birth_date=datetime.date(1990, 1, 1),
+            first_name="Admin",
+            last_name="Fail",
+            is_active=True,
+            role=UserRole.ADMIN,
+        )
+        target = UserTable(
+            username="target_user_ban_rollback",
+            email="target_ban_rollback@example.com",
+            hashed_password="123",
+            phone="+375297666666",
+            birth_date=datetime.date(1995, 1, 1),
+            first_name="Target",
+            last_name="BanRollback",
+            is_active=True,
+            role=UserRole.USER,
+            is_banned=False,
+        )
+        session.add_all([admin, target])
+        await session.commit()
+        await session.refresh(admin)
+        await session.refresh(target)
+        admin_id = admin.id
+        target_id = target.id
+
+    admin_payload = {"sub": str(admin_id), "role": UserRole.ADMIN.value}
+    access_token = create_jwt_token(admin_payload, datetime.timedelta(minutes=15))
+    headers = {"Authorization": f"Bearer {access_token}"}
+
+    with patch(
+        "bank_auth.clients.redis_client", new_callable=AsyncMock
+    ) as mock_redis, patch(
+        "bank_auth.clients.kafka_producer", new_callable=AsyncMock
+    ) as mock_kafka:
+        mock_redis.exists.return_value = False
+        mock_kafka.send_and_wait.side_effect = Exception("Kafka connection lost")
+
+        response = await ac.patch(
+            f"/admin/users/{target_id}/ban",
+            json={"is_banned": True},
+            headers=headers,
+        )
+
+        assert response.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
+
+    async with TestingSessionLocal() as session:
+        query = select(UserTable).where(UserTable.id == target_id)
+        result = await session.execute(query)
+        rolled_back_user = result.scalar_one()
+        assert rolled_back_user.is_banned is False
