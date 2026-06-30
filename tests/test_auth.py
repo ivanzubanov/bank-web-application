@@ -1,11 +1,12 @@
 import pytest
 import datetime
 from unittest.mock import AsyncMock, patch
+from sqlalchemy import select
 from httpx import AsyncClient
 from fastapi import status
 
 from tests.conftest import TestingSessionLocal
-from bank_auth.models import UserTable, UserRefreshTokenTable
+from bank_auth.models import UserTable, UserRefreshTokenTable, UserRole
 from bank_auth.utils import hash_password, create_jwt_token
 
 
@@ -297,10 +298,8 @@ async def test_refresh_tokens_success(ac: AsyncClient):
         session.add(db_token)
         await session.commit()
 
-    # Именуем mock_redis, чтобы настроить его поведение
     with patch("bank_auth.clients.redis_client", new_callable=AsyncMock) as mock_redis, \
             patch("bank_auth.clients.kafka_producer", new_callable=AsyncMock):
-        # Говорим, что токена нет в блеклисте Redis
         mock_redis.exists.return_value = False
 
         response = await ac.post("/auth/refresh", json={"refresh_token": refresh_token})
@@ -389,3 +388,196 @@ async def test_logout_refresh_token_not_found_failure(ac: AsyncClient):
     response = await ac.post("/auth/logout", json=logout_payload, headers=headers)
     assert response.status_code == status.HTTP_401_UNAUTHORIZED
     assert "Invalid or already revoked refresh token" in response.json()["detail"]
+
+# UPDATE USER ROLE
+
+@pytest.mark.asyncio
+async def test_change_user_role_success(ac: AsyncClient):
+    async with TestingSessionLocal() as session:
+        admin = UserTable(
+            username="admin_boss",
+            email="admin@example.com",
+            hashed_password="123",
+            phone="+375291111111",
+            birth_date=datetime.date(1990, 1, 1),
+            first_name="Admin",
+            last_name="Main",
+            is_active=True,
+            role=UserRole.ADMIN,
+        )
+        target = UserTable(
+            username="target_user",
+            email="target@example.com",
+            hashed_password="123",
+            phone="+375292222222",
+            birth_date=datetime.date(1995, 1, 1),
+            first_name="Target",
+            last_name="User",
+            is_active=True,
+            role=UserRole.USER,
+        )
+        session.add_all([admin, target])
+        await session.commit()
+        await session.refresh(admin)
+        await session.refresh(target)
+        admin_id = admin.id
+        target_id = target.id
+
+    admin_payload = {"sub": str(admin_id), "role": UserRole.ADMIN.value}
+    access_token = create_jwt_token(admin_payload, datetime.timedelta(minutes=15))
+    headers = {"Authorization": f"Bearer {access_token}"}
+
+    with patch(
+        "bank_auth.clients.redis_client", new_callable=AsyncMock
+    ) as mock_redis, patch(
+        "bank_auth.clients.kafka_producer", new_callable=AsyncMock
+    ) as mock_kafka:
+        mock_redis.exists.return_value = False
+
+        response = await ac.patch(
+            f"/admin/users/{target_id}/role",
+            json={"role": "ADMIN"},
+            headers=headers,
+        )
+
+        assert response.status_code == status.HTTP_200_OK
+        assert mock_kafka.send_and_wait.called
+
+    async with TestingSessionLocal() as session:
+        query = select(UserTable).where(UserTable.id == target_id)
+        result = await session.execute(query)
+        updated_user = result.scalar_one()
+        assert updated_user.role == UserRole.ADMIN
+
+
+@pytest.mark.asyncio
+async def test_change_user_role_forbidden_for_regular_user(ac: AsyncClient):
+    async with TestingSessionLocal() as session:
+        regular = UserTable(
+            username="regular_user",
+            email="regular@example.com",
+            hashed_password="123",
+            phone="+375293333333",
+            birth_date=datetime.date(1990, 1, 1),
+            first_name="Regular",
+            last_name="User",
+            is_active=True,
+            role=UserRole.USER,
+        )
+        session.add(regular)
+        await session.commit()
+        await session.refresh(regular)
+        regular_id = regular.id
+
+    regular_payload = {"sub": str(regular_id), "role": UserRole.USER.value}
+    access_token = create_jwt_token(regular_payload, datetime.timedelta(minutes=15))
+    headers = {"Authorization": f"Bearer {access_token}"}
+
+    with patch(
+        "bank_auth.clients.redis_client", new_callable=AsyncMock
+    ) as mock_redis:
+        mock_redis.exists.return_value = False
+
+        response = await ac.patch(
+            f"/admin/users/{regular_id}/role",
+            json={"role": "ADMIN"},
+            headers=headers,
+        )
+
+        assert response.status_code == status.HTTP_403_FORBIDDEN
+
+
+@pytest.mark.asyncio
+async def test_change_user_role_not_found(ac: AsyncClient):
+    async with TestingSessionLocal() as session:
+        admin = UserTable(
+            username="admin_boss_2",
+            email="admin2@example.com",
+            hashed_password="123",
+            phone="+375294444444",
+            birth_date=datetime.date(1990, 1, 1),
+            first_name="Admin",
+            last_name="Two",
+            is_active=True,
+            role=UserRole.ADMIN,
+        )
+        session.add(admin)
+        await session.commit()
+        await session.refresh(admin)
+        admin_id = admin.id
+
+    admin_payload = {"sub": str(admin_id), "role": UserRole.ADMIN.value}
+    access_token = create_jwt_token(admin_payload, datetime.timedelta(minutes=15))
+    headers = {"Authorization": f"Bearer {access_token}"}
+
+    with patch(
+        "bank_auth.clients.redis_client", new_callable=AsyncMock
+    ) as mock_redis:
+        mock_redis.exists.return_value = False
+
+        response = await ac.patch(
+            "/admin/users/99999/role", json={"role": "ADMIN"}, headers=headers
+        )
+
+        assert response.status_code == status.HTTP_404_NOT_FOUND
+
+
+@pytest.mark.asyncio
+async def test_change_user_role_infrastructure_failure_rollback(
+    ac: AsyncClient,
+):
+    async with TestingSessionLocal() as session:
+        admin = UserTable(
+            username="admin_boss_3",
+            email="admin3@example.com",
+            hashed_password="123",
+            phone="+375295555555",
+            birth_date=datetime.date(1990, 1, 1),
+            first_name="Admin",
+            last_name="Three",
+            is_active=True,
+            role=UserRole.ADMIN,
+        )
+        target = UserTable(
+            username="target_user_rollback",
+            email="target_rollback@example.com",
+            hashed_password="123",
+            phone="+375296666666",
+            birth_date=datetime.date(1995, 1, 1),
+            first_name="Target",
+            last_name="Rollback",
+            is_active=True,
+            role=UserRole.USER,
+        )
+        session.add_all([admin, target])
+        await session.commit()
+        await session.refresh(admin)
+        await session.refresh(target)
+        admin_id = admin.id
+        target_id = target.id
+
+    admin_payload = {"sub": str(admin_id), "role": UserRole.ADMIN.value}
+    access_token = create_jwt_token(admin_payload, datetime.timedelta(minutes=15))
+    headers = {"Authorization": f"Bearer {access_token}"}
+
+    with patch(
+        "bank_auth.clients.redis_client", new_callable=AsyncMock
+    ) as mock_redis, patch(
+        "bank_auth.clients.kafka_producer", new_callable=AsyncMock
+    ) as mock_kafka:
+        mock_redis.exists.return_value = False
+        mock_kafka.send_and_wait.side_effect = Exception("Kafka down")
+
+        response = await ac.patch(
+            f"/admin/users/{target_id}/role",
+            json={"role": "ADMIN"},
+            headers=headers,
+        )
+
+        assert response.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
+
+    async with TestingSessionLocal() as session:
+        query = select(UserTable).where(UserTable.id == target_id)
+        result = await session.execute(query)
+        rolled_back_user = result.scalar_one()
+        assert rolled_back_user.role == UserRole.USER

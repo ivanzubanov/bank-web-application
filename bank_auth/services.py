@@ -7,7 +7,8 @@ from bank_auth.config import settings
 from bank_auth import clients
 from bank_auth.schemas import (
     UserRegisterSchema, UserVerifySchema, OTPResendSchema,
-    UserLoginSchema, TokenResponseSchema, RefreshTokenRequestSchema
+    UserLoginSchema, TokenResponseSchema, RefreshTokenRequestSchema,
+    UserRoleUpdateSchema
 )
 from bank_auth.models import UserTable, UserRefreshTokenTable
 from bank_auth.utils import (
@@ -199,7 +200,7 @@ async def login_user(data: UserLoginSchema, db: AsyncSession):
             detail="Account is not activated. Please verify your OTP first"
         )
 
-    user_payload = {"sub": str(user.id), "role": user.role}
+    user_payload = {"sub": str(user.id), "role": user.role.value}
 
     access_token = create_jwt_token(user_payload, timedelta(minutes=15))
     refresh_token = create_jwt_token(user_payload, timedelta(days=30), is_refresh=True)
@@ -291,3 +292,46 @@ async def logout_user(
     await db.commit()
 
     return {"detail": "Successfully logged out"}
+
+
+async def update_user_role(user_id: int, data: UserRoleUpdateSchema, db: AsyncSession):
+    query = select(UserTable).where(UserTable.id == user_id)
+    result = await db.execute(query)
+    user = result.scalar_one_or_none()
+
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found"
+        )
+
+    old_role = user.role
+    user.role = data.role
+
+    try:
+        await db.flush()
+
+        event_data = {
+            "event_id": str(uuid.uuid4()),
+            "user_id": user.id,
+            "old_role": old_role.value,
+            "new_role": user.role.value,
+            "updated_at": datetime.now(timezone.utc).isoformat()
+        }
+
+        await clients.kafka_producer.send_and_wait(
+            topic="user_status_events",
+            value=json.dumps(event_data).encode("utf-8")
+        )
+        print(f"INTERNAL: Role update event sent to Kafka for user {user.id}")
+
+        await db.commit()
+        return {"message": f"User role successfully updated to {user.role.value}"}
+
+    except Exception as e:
+        await db.rollback()
+        print(f"❌ ROLE UPDATE ERROR (Rolled back): {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Infrastructure error. Failed to update role, please try again."
+        )

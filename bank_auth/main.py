@@ -5,6 +5,7 @@ from aiokafka import AIOKafkaProducer
 
 from bank_auth import clients
 from bank_auth.router import router
+from bank_auth.admin_router import admin_router
 from bank_auth.config import settings
 
 @asynccontextmanager
@@ -33,3 +34,4 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Bank Authentication Service", lifespan=lifespan)
 app.include_router(router)
+app.include_router(admin_router)

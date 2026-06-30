@@ -3,6 +3,8 @@ from datetime import date, timedelta
 from typing import Optional
 from pydantic import BaseModel, EmailStr, Field, field_validator, ConfigDict
 
+from bank_auth.models import UserRole
+
 PHONE_REGEX = re.compile(r"^\+\d{11,15}$")
 
 class UserRegisterSchema(BaseModel):
@@ -58,3 +60,6 @@ class TokenResponseSchema(BaseModel):
 
 class RefreshTokenRequestSchema(BaseModel):
     refresh_token: str
+
+class UserRoleUpdateSchema(BaseModel):
+    role: UserRole
