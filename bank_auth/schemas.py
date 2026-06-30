@@ -63,3 +63,7 @@ class RefreshTokenRequestSchema(BaseModel):
 
 class UserRoleUpdateSchema(BaseModel):
     role: UserRole
+
+class MassMailSchema(BaseModel):
+    subject: str = Field(..., min_length=1, max_length=255, description="Message subject")
+    body: str = Field(..., min_length=1, description="Message text (supports HTML or plain text)")

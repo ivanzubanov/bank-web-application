@@ -3,8 +3,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from bank_auth.database import get_db
 from bank_auth.dependencies import RoleChecker
-from bank_auth.schemas import UserRole, UserRoleUpdateSchema
-from bank_auth.services import update_user_role
+from bank_auth.schemas import UserRole, UserRoleUpdateSchema, MassMailSchema
+from bank_auth.services import update_user_role, mass_mail_users
 
 admin_router = APIRouter(
     prefix="/admin",
@@ -21,3 +21,14 @@ async def change_user_role_endpoint(
     db: AsyncSession = Depends(get_db)
 ):
     return await update_user_role(user_id, data, db)
+
+
+@admin_router.post(
+    "/mass-mail",
+    dependencies=[Depends(RoleChecker([UserRole.ADMIN]))]
+)
+async def mass_mail_endpoint(
+    data: MassMailSchema,
+    db: AsyncSession = Depends(get_db)
+):
+    return await mass_mail_users(data, db)

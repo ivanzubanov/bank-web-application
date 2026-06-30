@@ -581,3 +581,121 @@ async def test_change_user_role_infrastructure_failure_rollback(
         result = await session.execute(query)
         rolled_back_user = result.scalar_one()
         assert rolled_back_user.role == UserRole.USER
+
+# MASS MAIL SEND
+
+@pytest.mark.asyncio
+async def test_mass_mail_success(ac: AsyncClient):
+    async with TestingSessionLocal() as session:
+        admin = UserTable(
+            username="admin_mass",
+            email="admin_mass@example.com",
+            hashed_password="123",
+            phone="+375291111112",
+            birth_date=datetime.date(1990, 1, 1),
+            first_name="Admin",
+            last_name="Mass",
+            is_active=True,
+            role=UserRole.ADMIN,
+        )
+        user1 = UserTable(
+            username="user_mass_1",
+            email="user1@example.com",
+            hashed_password="123",
+            phone="+375292222223",
+            birth_date=datetime.date(1995, 1, 1),
+            first_name="User",
+            last_name="One",
+            is_active=True,
+            role=UserRole.USER,
+        )
+        user2 = UserTable(
+            username="user_mass_2",
+            email="user2@example.com",
+            hashed_password="123",
+            phone="+375292222224",
+            birth_date=datetime.date(1995, 1, 1),
+            first_name="User",
+            last_name="Two",
+            is_active=True,
+            role=UserRole.USER,
+        )
+        session.add_all([admin, user1, user2])
+        await session.commit()
+        await session.refresh(admin)
+        admin_id = admin.id
+
+    admin_payload = {"sub": str(admin_id), "role": UserRole.ADMIN.value}
+    access_token = create_jwt_token(admin_payload, datetime.timedelta(minutes=15))
+    headers = {"Authorization": f"Bearer {access_token}"}
+
+    mail_payload = {
+        "subject": "Test Subject",
+        "body": "Test Body Content"
+    }
+
+    with patch("bank_auth.clients.redis_client", new_callable=AsyncMock) as mock_redis, \
+         patch("bank_auth.clients.kafka_producer", new_callable=AsyncMock) as mock_kafka:
+        mock_redis.exists.return_value = False
+
+        response = await ac.post(
+            "/admin/mass-mail",
+            json=mail_payload,
+            headers=headers,
+        )
+
+        assert response.status_code == status.HTTP_200_OK
+        data = response.json()
+        assert data["status"] == "success"
+        assert data["total_processed_users"] == 3
+        assert mock_kafka.send_and_wait.call_count == 3
+
+
+@pytest.mark.asyncio
+async def test_mass_mail_forbidden_for_regular_user(ac: AsyncClient):
+    async with TestingSessionLocal() as session:
+        regular = UserTable(
+            username="regular_mass",
+            email="regular_mass@example.com",
+            hashed_password="123",
+            phone="+375293333334",
+            birth_date=datetime.date(1990, 1, 1),
+            first_name="Regular",
+            last_name="Mass",
+            is_active=True,
+            role=UserRole.USER,
+        )
+        session.add(regular)
+        await session.commit()
+        await session.refresh(regular)
+        regular_id = regular.id
+
+    regular_payload = {"sub": str(regular_id), "role": UserRole.USER.value}
+    access_token = create_jwt_token(regular_payload, datetime.timedelta(minutes=15))
+    headers = {"Authorization": f"Bearer {access_token}"}
+
+    mail_payload = {
+        "subject": "Test Subject",
+        "body": "Test Body Content"
+    }
+
+    with patch("bank_auth.clients.redis_client", new_callable=AsyncMock) as mock_redis:
+        mock_redis.exists.return_value = False
+
+        response = await ac.post(
+            "/admin/mass-mail",
+            json=mail_payload,
+            headers=headers,
+        )
+
+        assert response.status_code == status.HTTP_403_FORBIDDEN
+
+
+@pytest.mark.asyncio
+async def test_mass_mail_unauthorized(ac: AsyncClient):
+    mail_payload = {
+        "subject": "Test Subject",
+        "body": "Test Body Content"
+    }
+    response = await ac.post("/admin/mass-mail", json=mail_payload)
+    assert response.status_code == status.HTTP_403_FORBIDDEN

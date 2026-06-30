@@ -1,6 +1,9 @@
 import jwt
+import sys
 import json
 import uuid
+import logging
+import asyncio
 from datetime import timedelta, datetime, timezone
 
 from bank_auth.config import settings
@@ -8,7 +11,7 @@ from bank_auth import clients
 from bank_auth.schemas import (
     UserRegisterSchema, UserVerifySchema, OTPResendSchema,
     UserLoginSchema, TokenResponseSchema, RefreshTokenRequestSchema,
-    UserRoleUpdateSchema
+    UserRoleUpdateSchema, MassMailSchema
 )
 from bank_auth.models import UserTable, UserRefreshTokenTable
 from bank_auth.utils import (
@@ -20,6 +23,13 @@ from sqlalchemy import select, or_
 from sqlalchemy.exc import IntegrityError
 from fastapi import HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials
+
+logging.basicConfig(
+    level=logging.INFO,
+    stream=sys.stdout,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%H:%M:%S"
+)
 
 async def _generate_and_send_otp(user: UserTable) -> str:
     code = generate_otp()
@@ -38,7 +48,7 @@ async def _generate_and_send_otp(user: UserTable) -> str:
         topic="email_verification",
         value=json.dumps(event_data).encode("utf-8")
     )
-    print(f"INTERNAL: Verification event sent to Kafka for {user.email}")
+    logging.info(f"INTERNAL: Verification event sent to Kafka for {user.email}")
     return code
 
 
@@ -92,7 +102,7 @@ async def register_new_user(user_data: UserRegisterSchema, db: AsyncSession):
         )
     except Exception as e:
         await db.rollback()
-        print(f"❌ REGISTRATION ERROR (Rolled back): {e}")
+        logging.error(f"❌ REGISTRATION ERROR (Rolled back): {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Error during registration. Please, try again later"
@@ -139,7 +149,7 @@ async def verify_user_otp(data: UserVerifySchema, db: AsyncSession):
             topic="user_activated",
             value=json.dumps(event_data).encode("utf-8")
         )
-        print(f"INTERNAL: Event UserActivated is sent for user {user.id}")
+        logging.info(f"INTERNAL: Event UserActivated is sent for user {user.id}")
 
         await clients.redis_client.delete(redis_key)
         await db.commit()
@@ -148,7 +158,7 @@ async def verify_user_otp(data: UserVerifySchema, db: AsyncSession):
 
     except Exception as e:
         await db.rollback()
-        print(f"❌ ACTIVATION ERROR (Rolled back): {e}")
+        logging.error(f"❌ ACTIVATION ERROR (Rolled back): {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Infrastructure error. Activation failed, please try again."
@@ -323,15 +333,66 @@ async def update_user_role(user_id: int, data: UserRoleUpdateSchema, db: AsyncSe
             topic="user_status_events",
             value=json.dumps(event_data).encode("utf-8")
         )
-        print(f"INTERNAL: Role update event sent to Kafka for user {user.id}")
+        logging.info(f"INTERNAL: Role update event sent to Kafka for user {user.id}")
 
         await db.commit()
         return {"message": f"User role successfully updated to {user.role.value}"}
 
     except Exception as e:
         await db.rollback()
-        print(f"❌ ROLE UPDATE ERROR (Rolled back): {e}")
+        logging.error(f"❌ ROLE UPDATE ERROR (Rolled back): {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Infrastructure error. Failed to update role, please try again."
         )
+
+
+async def mass_mail_users(data: MassMailSchema, db: AsyncSession):
+    batch_size = 100
+    total_sent = 0
+    last_id = 0
+
+    while True:
+        query = (
+            select(UserTable)
+            .where(UserTable.id > last_id)
+            .order_by(UserTable.id.asc())
+            .limit(batch_size)
+        )
+
+        result = await db.execute(query)
+        users = result.scalars().all()
+
+        if not users:
+            break
+
+        tasks = []
+        for user in users:
+            user: UserTable
+            event_data = {
+                "id": str(uuid.uuid4()),
+                "email": user.email,
+                "username": user.username,
+                "subject": data.subject,
+                "body": data.body,
+                "dispatched_at": datetime.now(timezone.utc).isoformat()
+            }
+
+            tasks.append(
+                clients.kafka_producer.send_and_wait(
+                    topic="admin_mass_mail",
+                    value=json.dumps(event_data).encode("utf-8")
+                )
+            )
+
+        await asyncio.gather(*tasks)
+
+        total_sent += len(users)
+        last_id = users[-1].id
+
+    return {
+        "status": "success",
+        "message": "Mass mail events have been successfully chunked and streamed to Kafka",
+        "total_processed_users": total_sent
+    }
+
