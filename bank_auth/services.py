@@ -18,6 +18,14 @@ from bank_auth.utils import (
     hash_password, generate_otp, verify_password,
     create_jwt_token, decode_jwt_token
 )
+from bank_auth.kafka_schemas import (
+    EmailVerificationEvent,
+    AdminMassMailEvent,
+    UserActivatedEvent,
+    UserStatusChangedEvent
+)
+
+
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, or_
 from sqlalchemy.exc import IntegrityError
@@ -37,16 +45,16 @@ async def _generate_and_send_otp(user: UserTable) -> str:
 
     await clients.redis_client.set(name=redis_key, value=code, ex=300)
 
-    event_data = {
-        "event_id": str(uuid.uuid4()),
-        "email": user.email,
-        "otp_code": code,
-        "username": user.username
-    }
+    event = EmailVerificationEvent(
+        event_id=str(uuid.uuid4()),
+        email=user.email,
+        otp_code=code,
+        username=user.username
+    )
 
     await clients.kafka_producer.send_and_wait(
         topic="email_verification",
-        value=json.dumps(event_data).encode("utf-8")
+        value=json.dumps(event.model_dump()).encode("utf-8")
     )
     logging.info(f"INTERNAL: Verification event sent to Kafka for {user.email}")
     return code
@@ -139,15 +147,15 @@ async def verify_user_otp(data: UserVerifySchema, db: AsyncSession):
         user.is_active = True
         await db.flush()
 
-        event_data = {
-            "event_id": str(uuid.uuid4()),
-            "user_id": user.id,
-            "username": user.username,
-            "email": user.email
-        }
+        event = UserActivatedEvent(
+            event_id=str(uuid.uuid4()),
+            user_id=user.id,
+            username=user.username,
+            email=user.email
+        )
         await clients.kafka_producer.send_and_wait(
             topic="user_activated",
-            value=json.dumps(event_data).encode("utf-8")
+            value=json.dumps(event.model_dump()).encode("utf-8")
         )
         logging.info(f"INTERNAL: Event UserActivated is sent for user {user.id}")
 
@@ -326,20 +334,19 @@ async def update_user_role(user_id: int, data: UserRoleUpdateSchema, db: AsyncSe
     try:
         await db.flush()
 
-        event_data = {
-            "event_type": "UserStatusChanged",
-            "event_id": str(uuid.uuid4()),
-            "user_id": user.id,
-            "action": "ROLE_CHANGED",
-            "old_role": old_role.value,
-            "new_role": user.role.value,
-            "is_banned": user.is_banned,
-            "updated_at": datetime.now(timezone.utc).isoformat()
-        }
+        event = UserStatusChangedEvent(
+            event_id=str(uuid.uuid4()),
+            user_id=user.id,
+            action="ROLE_CHANGED",
+            old_role=old_role.value,
+            new_role=user.role.value,
+            is_banned=user.is_banned,
+            updated_at=datetime.now(timezone.utc).isoformat()
+        )
 
         await clients.kafka_producer.send_and_wait(
             topic="user_status_events",
-            value=json.dumps(event_data).encode("utf-8")
+            value=json.dumps(event.model_dump()).encode("utf-8")
         )
         logging.info(f"INTERNAL: Role update event sent to Kafka for user {user.id}")
 
@@ -377,19 +384,19 @@ async def mass_mail_users(data: MassMailSchema, db: AsyncSession):
         tasks = []
         for user in users:
             user: UserTable
-            event_data = {
-                "id": str(uuid.uuid4()),
-                "email": user.email,
-                "username": user.username,
-                "subject": data.subject,
-                "body": data.body,
-                "dispatched_at": datetime.now(timezone.utc).isoformat()
-            }
+            event = AdminMassMailEvent(
+                event_id=str(uuid.uuid4()),  # Теперь контракт стандартизирован!
+                email=user.email,
+                username=user.username,
+                subject=data.subject,
+                body=data.body,
+                dispatched_at=datetime.now(timezone.utc).isoformat()
+            )
 
             tasks.append(
                 clients.kafka_producer.send_and_wait(
                     topic="admin_mass_mail",
-                    value=json.dumps(event_data).encode("utf-8")
+                    value=json.dumps(event.model_dump()).encode("utf-8")
                 )
             )
 
@@ -421,20 +428,19 @@ async def ban_user(user_id: int, data: UserBanSchema, db: AsyncSession):
     try:
         await db.flush()
 
-        event_data = {
-            "event_type": "UserStatusChanged",
-            "event_id": str(uuid.uuid4()),
-            "user_id": user.id,
-            "action": action_type,
-            "old_role": user.role.value,
-            "new_role": user.role.value,
-            "is_banned": user.is_banned,
-            "updated_at": datetime.now(timezone.utc).isoformat()
-        }
+        event = UserStatusChangedEvent(
+            event_id=str(uuid.uuid4()),
+            user_id=user.id,
+            action=action_type,
+            old_role=user.role.value,
+            new_role=user.role.value,
+            is_banned=user.is_banned,
+            updated_at=datetime.now(timezone.utc).isoformat()
+        )
 
         await clients.kafka_producer.send_and_wait(
             topic="user_status_events",
-            value=json.dumps(event_data).encode("utf-8")
+            value=json.dumps(event.model_dump()).encode("utf-8")
         )
 
         await db.commit()
